@@ -1,0 +1,44 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Profile: GPT-2 on CPU — local testing without a GPU
+# Use this to verify the server works before running on real hardware
+# Model downloads automatically from HuggingFace (~500 MB, one time)
+#
+# Run:
+#   python run.py --config configs/gpt2_cpu.yaml --mode api
+#   python run.py --config configs/gpt2_cpu.yaml --mode prompt --prompt "What is AI?"
+#   python run.py --config configs/gpt2_cpu.yaml --mode chat
+# ─────────────────────────────────────────────────────────────────────────────
+
+model:
+  path: gpt2                   # downloads automatically from HuggingFace
+  dtype: float32               # CPU works better with float32
+  trust_remote_code: false
+
+backend: hf                    # vLLM does not work on Windows or CPU
+
+quantization:
+  method: none                 # gpt2 is small (500MB), no need to compress
+
+hardware:
+  device: cpu                  # no GPU needed
+  num_gpus: 1
+  gpu_memory_utilization: 0.90
+  max_memory: null
+  offload_folder: ./offload_cache
+
+generation:
+  max_new_tokens: 100          # keep short — CPU is slow
+  max_model_len: 1024
+  temperature: 0.7
+  top_p: 0.9
+  top_k: 50
+  repetition_penalty: 1.1
+
+server:
+  host: 0.0.0.0
+  port: 8000
+  timeout: 120                 # generous timeout since CPU is slow
+
+logging:
+  level: INFO
+  file: ./logs/gpt2.log

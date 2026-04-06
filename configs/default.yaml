@@ -1,0 +1,57 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Default inference engine configuration
+# CLI flags in run.py override every value here.
+# ─────────────────────────────────────────────────────────────────────────────
+
+model:
+  path: Qwen/Qwen2-7B-Instruct
+  dtype: float16               # float16 | bfloat16 | auto
+  trust_remote_code: false
+
+# Primary: vllm   Fallback: hf
+backend: vllm
+
+quantization:
+  method: none                 # none | 4bit | 8bit | awq | gptq
+  # bitsandbytes 4-bit options (only used when method: 4bit or 8bit)
+  compute_dtype: float16
+  quant_type: nf4              # nf4 | fp4
+  double_quant: true
+
+hardware:
+  device: cuda                 # cuda | cpu | auto
+  num_gpus: 1                  # >1 enables tensor parallelism in vLLM
+  gpu_memory_utilization: 0.90 # vLLM: fraction of VRAM for KV-cache pool
+  max_memory: null             # HF fallback: {"0": "20GiB", "cpu": "48GiB"}
+  offload_folder: ./offload_cache
+
+  # Admission controller thresholds (GB of free VRAM)
+  admission_fast_threshold_gb: 4.0
+  admission_offload_threshold_gb: 1.5
+
+generation:
+  max_new_tokens: 512
+  max_model_len: 4096          # vLLM: max context window (prompt + generation)
+  temperature: 0.7
+  top_p: 0.9
+  top_k: 50
+  repetition_penalty: 1.1
+
+# Speculative decoding (vLLM only) — improves inter-token latency on memory-
+# bound workloads at lower QPS. See docs/speculative_decoding.md.
+speculative_decoding:
+  enabled: false
+  method: ngram                # ngram | draft_model
+  num_speculative_tokens: 5
+  ngram_prompt_lookup_max: 4
+  draft_model: null            # HF repo id for draft_model method
+
+server:
+  host: 0.0.0.0
+  port: 8000
+  workers: 1
+  timeout: 120
+
+logging:
+  level: INFO
+  file: ./logs/inference.log

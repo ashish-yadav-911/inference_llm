@@ -1,0 +1,44 @@
+# Profile: Qwen2-7B-Instruct, pre-quantized AWQ, single GPU
+# Target hardware: RTX 3080 / 3090 / 4080 / A10G (≥ 10 GB VRAM)
+# Expected footprint: ~4.5 GB weights + ~2 GB KV-cache pool
+# Expected throughput: ~40 tok/s single user, ~60 tok/s under load (vLLM)
+
+model:
+  path: ./artifacts/qwen2-7b-awq    # local path after running scripts/quantize.py
+  dtype: float16
+  trust_remote_code: false
+
+backend: vllm
+
+quantization:
+  method: awq
+
+hardware:
+  device: cuda
+  num_gpus: 1
+  gpu_memory_utilization: 0.90
+  admission_fast_threshold_gb: 3.0
+  admission_offload_threshold_gb: 1.0
+
+generation:
+  max_new_tokens: 1024
+  max_model_len: 4096
+  temperature: 0.7
+  top_p: 0.9
+  top_k: 50
+  repetition_penalty: 1.1
+
+speculative_decoding:
+  enabled: true
+  method: ngram
+  num_speculative_tokens: 5
+  ngram_prompt_lookup_max: 4
+
+server:
+  host: 0.0.0.0
+  port: 8000
+  timeout: 90
+
+logging:
+  level: INFO
+  file: ./logs/qwen2-7b.log

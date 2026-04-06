@@ -1,0 +1,72 @@
+version: "3.9"
+
+# Usage:
+#   docker compose up                          # inference server
+#   docker compose --profile tools up quantize # offline quantization job
+#   CONFIG=llama3_70b_multigpu docker compose up
+
+services:
+
+  inference:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile
+    image: llm-inference-engine:v2
+    container_name: llm-inference
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8000}:8000"
+    volumes:
+      - ${ARTIFACT_DIR:-./artifacts}:/app/artifacts:ro
+      - offload_cache:/app/offload_cache
+      - ./logs:/app/logs
+    environment:
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
+      - TOKENIZERS_PARALLELISM=false
+      - HF_TOKEN=${HF_TOKEN:-}
+    command: >
+      python run.py
+        --config configs/${CONFIG:-qwen2_7b_awq}.yaml
+        --mode api
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${NUM_GPUS:-1}
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+
+  quantize:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile
+    image: llm-inference-engine:v2
+    container_name: llm-quantize
+    volumes:
+      - ${ARTIFACT_DIR:-./artifacts}:/app/artifacts
+      - ${HF_CACHE:-~/.cache/huggingface}:/home/inference/.cache/huggingface
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+    command: >
+      python scripts/quantize.py ${QUANT_METHOD:-awq}
+        --model ${BASE_MODEL:-Qwen/Qwen2-7B-Instruct}
+        --output /app/artifacts/${OUTPUT_NAME:-model-awq}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    profiles: [tools]
+
+volumes:
+  offload_cache:
