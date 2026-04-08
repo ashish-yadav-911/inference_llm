@@ -1,4 +1,45 @@
+"""
+inference/worker_pool.py
+========================
+Data-Parallel worker pool.
 
+Each worker is one InferenceEngine that owns `tensor_parallel_size` GPUs.
+The pool manages N workers, each in its own process, and routes requests
+via round-robin (default) or least-busy scheduling.
+
+Architecture
+------------
+
+  8 GPUs, tensor_parallel_size=4, data_parallel_size=2
+  ┌────────────────────────────────────────────────┐
+  │  WorkerPool                                    │
+  │  ┌──────────────────┐  ┌──────────────────┐   │
+  │  │ Worker 0         │  │ Worker 1         │   │
+  │  │ GPUs 0,1,2,3     │  │ GPUs 4,5,6,7     │   │
+  │  │ InferenceEngine  │  │ InferenceEngine  │   │
+  │  └──────────────────┘  └──────────────────┘   │
+  │            ↑                      ↑            │
+  │       RoundRobin / LeastBusy load balancer     │
+  └────────────────────────────────────────────────┘
+
+Usage
+-----
+  pool = WorkerPool.from_config(config)
+  pool.start()                              # spawns worker processes
+
+  result = pool.generate(prompt, **kwargs)  # routes to a free worker
+  for chunk in pool.stream(prompt):         # streaming, same routing
+      print(chunk, end="", flush=True)
+
+  pool.shutdown()
+
+Config keys consumed (under `hardware:`)
+-----------------------------------------
+  tensor_parallel_size:  int  # GPUs per replica  (default: num_gpus)
+  data_parallel_size:    int  # number of replicas (default: derived)
+  num_gpus:              int  # total GPUs available
+  schedule:              str  # "round_robin" | "least_busy"  (default: round_robin)
+"""
 
 from __future__ import annotations
 
@@ -151,7 +192,13 @@ class _WorkerHandle:
 # ---------------------------------------------------------------------------
 
 class WorkerPool:
+    """
+    Manages `data_parallel_size` worker subprocesses, each running one
+    InferenceEngine with `tensor_parallel_size` GPUs.
 
+    Thread-safe: all public methods can be called from multiple FastAPI
+    worker coroutines simultaneously.
+    """
 
     def __init__(self, config: dict) -> None:
         self._config = config

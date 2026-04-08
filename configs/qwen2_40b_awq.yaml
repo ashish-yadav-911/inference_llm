@@ -1,6 +1,6 @@
  
 model:
-  path: ./artifacts/qwen2-40b-awq      # produce with: python scripts/quantize.py awq --model Qwen/Qwen2-72B-Instruct
+  path: ./artifacts/qwen2-40b-awq      # produce with: python scripts/quantize.py awq --model Qwen/Qwen2-40B-Instruct
   dtype: float16
   trust_remote_code: false
  
@@ -12,9 +12,9 @@ quantization:
 hardware:
   device: cuda
   num_gpus: 4
-  tensor_parallel_size: 4
+  tensor_parallel_size: 2
   pipeline_parallel_size: 1
-  data_parallel_size: 1
+  data_parallel_size: 2
   schedule: round_robin               
   gpu_memory_utilization: 0.85
   admission_fast_threshold_gb: 8.0

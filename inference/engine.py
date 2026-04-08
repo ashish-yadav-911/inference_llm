@@ -1,4 +1,13 @@
+"""
+  Primary  : vLLM  (PagedAttention, AWQ/GPTQ/bitsandbytes, streaming, batching)
+  Fallback : HuggingFace Transformers + bitsandbytes  (broader compatibility)
 
+  Parallelism support:
+    - Tensor Parallelism  (tp_size)  : splits one model across N GPUs  → solves SPACE
+    - Pipeline Parallelism (pp_size) : splits layers across N GPUs     → alternative to TP
+    - Data Parallelism               : multiple workers, each TP-sharded → solves THROUGHPUT
+      → handled by WorkerPool in inference/worker_pool.py
+"""
 
 from __future__ import annotations
 
@@ -15,6 +24,22 @@ logger = logging.getLogger(__name__)
 
 
 class InferenceEngine:
+    """
+    Single engine instance.  Owns `tp_size` GPUs.
+
+    For Data Parallelism spin up multiple InferenceEngine instances via
+    WorkerPool, passing `gpu_offset` so each worker maps to the right devices.
+
+    Config additions vs. the 7B version
+    ------------------------------------
+    hardware:
+      num_gpus: 8                     # total GPUs on the machine
+      tensor_parallel_size: 4         # GPUs per model replica  (TP)
+      pipeline_parallel_size: 1       # layer-pipeline stages   (PP, vLLM only)
+      data_parallel_size: 2           # num replicas = num_gpus / tp_size
+      gpu_offset: 0                   # first GPU index this worker owns
+                                      # (set automatically by WorkerPool)
+    """
 
     def __init__(self, config: dict, gpu_offset: int = 0) -> None:
         self._config = config

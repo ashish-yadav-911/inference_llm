@@ -11,7 +11,7 @@ quantization:
 hardware:
   device: cuda
   num_gpus: 8
-  tensor_parallel_size: 4         
+  tensor_parallel_size: 2  
   pipeline_parallel_size: 1          
   data_parallel_size: 2            
   schedule: least_busy                
