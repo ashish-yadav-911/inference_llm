@@ -33,8 +33,8 @@ class InferenceEngine:
     Config additions vs. the 7B version
     ------------------------------------
     hardware:
-      num_gpus: 8                     # total GPUs on the machine
-      tensor_parallel_size: 4         # GPUs per model replica  (TP)
+      num_gpus: 4                     # total GPUs on the machine
+      tensor_parallel_size: 2         # GPUs per model replica  (TP)
       pipeline_parallel_size: 1       # layer-pipeline stages   (PP, vLLM only)
       data_parallel_size: 2           # num replicas = num_gpus / tp_size
       gpu_offset: 0                   # first GPU index this worker owns
@@ -129,8 +129,8 @@ class InferenceEngine:
         """
         Restrict CUDA visibility to the GPUs this worker owns.
 
-        Worker 0, tp=4 → CUDA_VISIBLE_DEVICES=0,1,2,3
-        Worker 1, tp=4 → CUDA_VISIBLE_DEVICES=4,5,6,7
+        Worker 0, tp=2 → CUDA_VISIBLE_DEVICES=0,2
+        Worker 1, tp=2 → CUDA_VISIBLE_DEVICES=1,3
 
         Must happen before any CUDA / vLLM import so the driver sees only
         the assigned devices.  Has no effect on CPU-only configs.
@@ -169,7 +169,7 @@ class InferenceEngine:
             # ── Tensor Parallelism: slice weight matrices across GPUs ──
             tensor_parallel_size=self._tp_size,
             # ── Pipeline Parallelism: partition layers into stages ──────
-            pipeline_parallel_size=self._pp_size,
+            pipeline_parallel_size=self._pp_size, #disabled by selecting 1
             gpu_memory_utilization=gpu_util,
             max_model_len=max_model_len,
             trust_remote_code=self._config["model"].get("trust_remote_code", False),
