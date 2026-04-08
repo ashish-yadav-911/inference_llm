@@ -1,7 +1,4 @@
-"""
-  Primary  : vLLM  (PagedAttention, AWQ/GPTQ/bitsandbytes, streaming, batching)
-  Fallback : HuggingFace Transformers + bitsandbytes  (broader compatibility)
-"""
+
 
 from __future__ import annotations
 
@@ -10,30 +7,32 @@ import logging
 import os
 import threading
 import time
-from queue import Queue, Empty
-from typing import Generator, Iterator, List, Optional
+from typing import Iterator, List, Optional
 
 import torch
 
 logger = logging.getLogger(__name__)
 
-_SENTINEL = object()
-
 
 class InferenceEngine:
 
-
-    def __init__(self, config: dict) -> None:
+    def __init__(self, config: dict, gpu_offset: int = 0) -> None:
         self._config = config
         self._model = None
         self._tokenizer = None
         self._loaded = False
 
-        # Resolved at load time
         self._backend_name: str = ""
         self._model_id: str = config["model"]["path"]
         self._quantization: str = config["quantization"]["method"]
         self._device: str = config["hardware"]["device"]
+
+        hw = config["hardware"]
+        # ── Parallelism geometry ──────────────────────────────────────────
+        self._tp_size: int = hw.get("tensor_parallel_size", hw.get("num_gpus", 1))
+        self._pp_size: int = hw.get("pipeline_parallel_size", 1)
+        # gpu_offset lets WorkerPool assign non-overlapping GPU ranges
+        self._gpu_offset: int = hw.get("gpu_offset", gpu_offset)
 
         # Admission controller — injected after load so we have model geometry
         self.admission_controller = None
@@ -62,12 +61,23 @@ class InferenceEngine:
     def device(self) -> str:
         return self._device
 
+    @property
+    def tp_size(self) -> int:
+        return self._tp_size
+
+    @property
+    def gpu_offset(self) -> int:
+        return self._gpu_offset
+
     # ------------------------------------------------------------------
     # Load
     # ------------------------------------------------------------------
 
     def load(self) -> None:
         """Load model onto GPU(s).  Tries vLLM first, falls back to HF."""
+        # Pin this worker to its designated GPUs before importing anything
+        self._pin_cuda_devices()
+
         preferred = self._config.get("backend", "vllm")
 
         if preferred == "vllm":
@@ -84,10 +94,31 @@ class InferenceEngine:
 
         self._loaded = True
         logger.info(
-            "Engine ready | backend=%s | model=%s | quant=%s",
+            "Engine ready | backend=%s | model=%s | quant=%s | tp=%d | pp=%d | gpu_offset=%d",
             self._backend_name, self._model_id, self._quantization,
+            self._tp_size, self._pp_size, self._gpu_offset,
         )
         self._setup_admission_controller()
+
+    def _pin_cuda_devices(self) -> None:
+        """
+        Restrict CUDA visibility to the GPUs this worker owns.
+
+        Worker 0, tp=4 → CUDA_VISIBLE_DEVICES=0,1,2,3
+        Worker 1, tp=4 → CUDA_VISIBLE_DEVICES=4,5,6,7
+
+        Must happen before any CUDA / vLLM import so the driver sees only
+        the assigned devices.  Has no effect on CPU-only configs.
+        """
+        if self._device == "cpu":
+            return
+        device_ids = ",".join(
+            str(self._gpu_offset + i) for i in range(self._tp_size)
+        )
+        # Only set if not already pinned (single-engine / testing path)
+        if "CUDA_VISIBLE_DEVICES" not in os.environ:
+            os.environ["CUDA_VISIBLE_DEVICES"] = device_ids
+            logger.debug("Pinned CUDA_VISIBLE_DEVICES=%s", device_ids)
 
     # -- vLLM --------------------------------------------------------------
 
@@ -97,40 +128,47 @@ class InferenceEngine:
         quant = self._quantization
         quantization_arg = None if quant == "none" else quant
 
-        num_gpus = self._config["hardware"].get("num_gpus", 1)
         gpu_util = self._config["hardware"].get("gpu_memory_utilization", 0.90)
         max_model_len = self._config["generation"].get("max_model_len", 4096)
         dtype = self._config["model"].get("dtype", "auto")
 
         logger.info(
-            "Loading via vLLM | quant=%s | tensor_parallel=%d | gpu_util=%.2f",
-            quantization_arg, num_gpus, gpu_util,
+            "Loading via vLLM | quant=%s | tensor_parallel=%d | pipeline_parallel=%d | gpu_util=%.2f",
+            quantization_arg, self._tp_size, self._pp_size, gpu_util,
         )
 
         self._model = LLM(
             model=self._model_id,
             quantization=quantization_arg,
             dtype=dtype,
-            tensor_parallel_size=num_gpus,
+            # ── Tensor Parallelism: slice weight matrices across GPUs ──
+            tensor_parallel_size=self._tp_size,
+            # ── Pipeline Parallelism: partition layers into stages ──────
+            pipeline_parallel_size=self._pp_size,
             gpu_memory_utilization=gpu_util,
             max_model_len=max_model_len,
             trust_remote_code=self._config["model"].get("trust_remote_code", False),
             enforce_eager=self._config.get("enforce_eager", False),
-            # Speculative decoding (optional)
             **self._speculative_decoding_kwargs(),
         )
 
-        # vLLM bundles its own tokenizer; expose it for apply_chat_template
         self._tokenizer = self._model.get_tokenizer()
 
     def _speculative_decoding_kwargs(self) -> dict:
         """
         Build speculative decoding kwargs if configured.
-        vLLM supports draft-model, ngram, and EAGLE speculative decoding.
-        See: https://docs.vllm.ai/en/latest/features/spec_decode.html
+        NOTE: speculative decoding is incompatible with pipeline_parallel_size > 1.
+        vLLM will raise if both are set; we guard here and warn.
         """
         spec = self._config.get("speculative_decoding", {})
         if not spec.get("enabled", False):
+            return {}
+
+        if self._pp_size > 1:
+            logger.warning(
+                "Speculative decoding is incompatible with pipeline_parallel_size > 1 "
+                "(pp=%d). Disabling speculative decoding.", self._pp_size
+            )
             return {}
 
         method = spec.get("method", "ngram")
@@ -153,6 +191,10 @@ class InferenceEngine:
     # -- HuggingFace fallback ----------------------------------------------
 
     def _load_hf(self) -> None:
+        """
+        HF fallback.  device_map='auto' handles basic tensor-parallel-like
+        sharding via Accelerate.  True AllReduce TP is vLLM-only.
+        """
         from transformers import AutoModelForCausalLM, AutoTokenizer  # type: ignore
 
         hw = self._config["hardware"]
@@ -161,10 +203,17 @@ class InferenceEngine:
         dtype_str = model_cfg.get("dtype", "float16")
         dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}.get(dtype_str, torch.float16)
 
+        if self._tp_size > 1:
+            logger.warning(
+                "HF backend does not support true Tensor Parallelism. "
+                "Using device_map='auto' (Accelerate naive sharding) across %d GPUs. "
+                "For real TP use vLLM.", self._tp_size
+            )
+
         logger.info("Loading via HuggingFace Transformers | quant=%s", quant_cfg["method"])
 
         bnb_config = self._build_bnb_config(quant_cfg)
-        device_map = "auto" if hw.get("device") in ("auto", "multi") else hw.get("device", "cuda")
+        device_map = "auto"  # Accelerate spreads layers across visible GPUs
         max_memory = hw.get("max_memory", None)
 
         self._tokenizer = AutoTokenizer.from_pretrained(
@@ -185,19 +234,16 @@ class InferenceEngine:
             trust_remote_code=model_cfg.get("trust_remote_code", False),
         )
         self._model.eval()
-        # Tensor Core fast paths
         torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
         torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
         torch.backends.cudnn.benchmark = True
 
     @staticmethod
     def _build_bnb_config(quant_cfg: dict):
-        """Build BitsAndBytesConfig or return None."""
         method = quant_cfg.get("method", "none").lower()
         if method == "none":
             return None
         if method in ("awq", "gptq"):
-            # Pre-quantized models — BnB not involved in loading
             return None
         try:
             from transformers import BitsAndBytesConfig  # type: ignore
@@ -208,7 +254,6 @@ class InferenceEngine:
         if method == "8bit":
             return BitsAndBytesConfig(load_in_8bit=True)
         if method == "4bit":
-            import torch
             compute_dtype = getattr(torch, quant_cfg.get("compute_dtype", "float16"), torch.float16)
             return BitsAndBytesConfig(
                 load_in_4bit=True,
@@ -235,13 +280,6 @@ class InferenceEngine:
         repetition_penalty: float = 1.1,
         stop: Optional[List[str]] = None,
     ) -> dict:
-        """
-        Generate text for a single prompt.
-
-        Returns
-        -------
-        dict with keys: text, tokens_generated, prompt_tokens
-        """
         self._assert_loaded()
         if self._backend_name == "vllm":
             return self._generate_vllm(prompt, max_new_tokens, temperature, top_p, top_k, repetition_penalty, stop or [])
@@ -268,6 +306,7 @@ class InferenceEngine:
             "text": text,
             "tokens_generated": len(out.outputs[0].token_ids),
             "prompt_tokens": len(out.prompt_token_ids),
+            "latency_seconds": round(elapsed, 4),
         }
 
     def _generate_hf(self, prompt, max_new_tokens, temperature, top_p, top_k, rep_pen) -> dict:
@@ -413,18 +452,12 @@ class InferenceEngine:
     # ------------------------------------------------------------------
 
     def apply_chat_template(self, messages: list) -> str:
-        """
-        Format a list of ChatMessage objects into a single prompt string
-        using the model's built-in chat template (if available).
-        Falls back to a simple Human/Assistant format.
-        """
         msg_dicts = [{"role": m.role, "content": m.content} for m in messages]
         try:
             return self._tokenizer.apply_chat_template(
                 msg_dicts, tokenize=False, add_generation_prompt=True
             )
         except Exception:  # noqa: BLE001
-            # Fallback for models without a registered chat template
             parts = []
             for m in msg_dicts:
                 prefix = {"system": "System", "user": "Human", "assistant": "Assistant"}.get(
@@ -439,7 +472,6 @@ class InferenceEngine:
     # ------------------------------------------------------------------
 
     def memory_stats(self) -> List[dict]:
-        """Return per-GPU memory stats (list, one entry per visible GPU)."""
         if not torch.cuda.is_available():
             return [{"allocated_gb": 0, "reserved_gb": 0, "total_gb": 0, "free_gb": 0, "name": "cpu"}]
 
@@ -451,6 +483,7 @@ class InferenceEngine:
             total = props.total_memory / 1e9
             stats.append({
                 "name": props.name,
+                "index": self._gpu_offset + i,   # physical GPU index
                 "allocated_gb": round(alloc, 2),
                 "reserved_gb": round(res, 2),
                 "total_gb": round(total, 2),
@@ -459,7 +492,6 @@ class InferenceEngine:
         return stats
 
     def _maybe_flush_cache(self, threshold: float = 0.10) -> None:
-        """Flush CUDA allocator cache if free VRAM drops below threshold fraction."""
         if not torch.cuda.is_available():
             return
         for i in range(torch.cuda.device_count()):
@@ -476,14 +508,9 @@ class InferenceEngine:
     # ------------------------------------------------------------------
 
     def _setup_admission_controller(self) -> None:
-        """
-        Wire up the memory-budget admission controller using the model's
-        actual architecture constants (num_layers, num_kv_heads, head_dim).
-        """
         try:
             from serving.admission import AdmissionController, geometry_from_hf_config  # noqa: PLC0415
 
-            # Get model config — works for both vLLM and HF
             if self._backend_name == "vllm":
                 hf_cfg = self._model.llm_engine.model_config.hf_config
             else:
