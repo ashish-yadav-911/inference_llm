@@ -47,6 +47,7 @@ class Trainer:
             labels        = batch["labels"].to(self.device)
 
             # Mask padding positions so loss doesn't train on pad tokens
+           # labels = labels.masked_fill(labels == self.model.module.config.pad_token_id)
             labels = labels.masked_fill(labels == self.model.module.config.pad_token_id, -100)
 
             # Mixed precision forward pass

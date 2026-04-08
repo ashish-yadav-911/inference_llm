@@ -70,6 +70,7 @@ def main():
         sampler=sampler,
         num_workers=2,
         pin_memory=True,
+        collate_fn=collator,
     )
 
     train_cfg = config["training"]

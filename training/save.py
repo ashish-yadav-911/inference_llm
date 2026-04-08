@@ -8,7 +8,7 @@ def save_checkpoint(model, optimizer, step, save_dir):
 
     checkpoint = {
         "step": step,
-        "model": model.state_dict(),
+        "model": model.module.state_dict(),
         "optimizer": optimizer.state_dict()
     }
 
