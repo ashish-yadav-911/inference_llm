@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class _Request:
-    """Sent from main process → worker process."""
+    # Sent from main process to worker process.
     __slots__ = ("request_id", "method", "args", "kwargs")
 
     def __init__(self, request_id: int, method: str, args: tuple, kwargs: dict) -> None:
@@ -30,7 +30,7 @@ class _Request:
 
 
 class _Response:
-    """Sent from worker process → main process."""
+    # Sent from worker process to main process.
     __slots__ = ("request_id", "payload", "error", "is_chunk", "is_done")
 
     def __init__(
@@ -53,11 +53,7 @@ class _Response:
 # ---------------------------------------------------------------------------
 
 def _worker_process(config: dict, gpu_offset: int, req_q: mp.Queue, resp_q: mp.Queue) -> None:
-    """
-    Runs inside a subprocess.
-    Owns GPUs [gpu_offset, gpu_offset + tp_size).
-    Processes requests from req_q, writes responses to resp_q.
-    """
+    # Subprocess loop: owns a GPU slice, handles requests, and writes responses.
     # Must set before importing torch / vLLM
     tp_size = config["hardware"].get("tensor_parallel_size", config["hardware"].get("num_gpus", 1))
     device_ids = ",".join(str(gpu_offset + i) for i in range(tp_size))
@@ -151,13 +147,7 @@ class _WorkerHandle:
 # ---------------------------------------------------------------------------
 
 class WorkerPool:
-    """
-    Manages `data_parallel_size` worker subprocesses, each running one
-    InferenceEngine with `tensor_parallel_size` GPUs.
-
-    Thread-safe: all public methods can be called from multiple FastAPI
-    worker coroutines simultaneously.
-    """
+    # Manages data-parallel worker subprocesses with thread-safe request routing.
 
     def __init__(self, config: dict) -> None:
         self._config = config
@@ -212,7 +202,7 @@ class WorkerPool:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Spawn all worker subprocesses and start the response dispatcher."""
+        # Spawn all workers and start the response dispatcher thread.
         if self._workers:
             raise RuntimeError("WorkerPool already started")
 
@@ -245,7 +235,7 @@ class WorkerPool:
         self._dispatcher.start()
 
     def shutdown(self) -> None:
-        """Send poison pills and join all worker processes."""
+        # Stop dispatcher, signal workers to exit, and join processes.
         self._running = False
         for w in self._workers:
             try:
@@ -266,11 +256,7 @@ class WorkerPool:
     # ------------------------------------------------------------------
 
     def _dispatch_responses(self) -> None:
-        """
-        Continuously drain _resp_q and route responses to waiting callers.
-        Streaming responses are forwarded chunk-by-chunk into a queue that
-        the stream() method reads.
-        """
+        # Drain shared response queue and route results/chunks to pending callers.
         while self._running:
             try:
                 resp: _Response = self._resp_q.get(timeout=0.5)
@@ -327,10 +313,7 @@ class WorkerPool:
         return alive[idx]
 
     def _send(self, method: str, args: tuple, kwargs: dict, is_stream: bool = False) -> tuple:
-        """
-        Internal: pick a worker, register a pending slot, send the request.
-        Returns (request_id, slot, worker).
-        """
+        # Pick a worker, register pending slot, and dispatch request.
         req_id = self._next_request_id()
         worker = self._pick_worker()
         worker.increment()
@@ -448,7 +431,7 @@ class WorkerPool:
             self._cleanup(req_id)
 
     def memory_stats(self) -> List[List[dict]]:
-        """Returns memory stats from all workers."""
+        # Collect memory stats from each worker.
         results = []
         for worker in self._workers:
             req_id = self._next_request_id()
@@ -468,7 +451,7 @@ class WorkerPool:
         return results
 
     def pool_stats(self) -> dict:
-        """Quick status snapshot — no subprocess round-trip."""
+        # Return a quick pool snapshot without subprocess round-trips.
         return {
             "workers": [
                 {
